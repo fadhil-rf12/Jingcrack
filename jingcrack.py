@@ -25,6 +25,9 @@ _TMP_HTTPX = RESULTS_DIR / f"{RANDOM_ID}_tmp_httpx.json"
 OUT_SUBDOMAIN = RESULTS_DIR / f"{RANDOM_ID}_subdomain.txt"
 OUT_REPORT = RESULTS_DIR / f"{RANDOM_ID}_report.json"
 
+FAILED_FILENAME = "NMAP_FAILED.txt"
+FAILED_PATH = os.path.join(PATH_CWD, DIRNAME, FAILED_FILENAME)
+
 # ─── Argumen CLI ──────────────────────────────────────────────────────────────
 
 parser = ArgumentParser(
@@ -104,6 +107,9 @@ def pinging(targets: list[str]):
             online.append(domain)
         else:
             err(f"{domain} → tampak down")
+            with open(FAILED_PATH, "w") as failed:
+                failed.write(hasil.stderr)
+            print(f"  Detail error ada di {FAILED_PATH}")
             offline.append(domain)
 
     info(f"Selesai: {len(online)} online, {len(offline)} offline "
@@ -290,8 +296,8 @@ def main():
     info(f"Output folder: results/{RANDOM_ID}/\n")
 
     # Pipeline
-    pinging(targets)
-    subdomains = subfinder_fase(targets)
+    ping = pinging(targets)
+    subdomains = subfinder_fase(ping[0])
 
     if not subdomains:
         err("Tidak ada subdomain ditemukan. Pipeline dihentikan.")
