@@ -38,7 +38,7 @@ go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
 
-Pastikan semua tools sudah ada di PATH sistem Anda.
+Pastikan semua tools sudah ada di PATH sistem Anda. Dan untuk subfinder, pastikan Anda sudah mengatur providernya.
 
 ## Penggunaan
 
