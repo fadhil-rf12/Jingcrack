@@ -8,16 +8,19 @@ import subprocess
 from datetime import datetime
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 
 # ─── Konfigurasi awal ─────────────────────────────────────────────────────────
 
 RANDOM_ID = random.randint(1, 9999)
 PATH_CWD = Path(os.getcwd())
-DIRNAME = f"jingcrack_{str(RANDOM_ID)}"
-
+DIRNAME = f"jingcrack_{RANDOM_ID}"
 RESULTS_DIR = PATH_CWD / DIRNAME
 
 # File sementara (di dalam folder output)
+_TMP_TARGETS = RESULTS_DIR / f"{RANDOM_ID}_tmp_targets.txt"
 _TMP_SUBFINDER = RESULTS_DIR / f"{RANDOM_ID}_tmp_subfinder.txt"
 _TMP_HTTPX = RESULTS_DIR / f"{RANDOM_ID}_tmp_httpx.json"
 
@@ -31,7 +34,7 @@ FAILED_PATH = os.path.join(PATH_CWD, DIRNAME, FAILED_FILENAME)
 # ─── Argumen CLI ──────────────────────────────────────────────────────────────
 
 parser = ArgumentParser(
-    description="Jingcrack — Recon pipeline: subfinder → httpx → nuclei"
+    description="JingCrack — Recon pipeline: subfinder → crt.sh → httpx → nuclei"
 )
 parser.add_argument(
     "-t", "--target",
@@ -107,7 +110,7 @@ def pinging(targets: list[str]):
             online.append(domain)
         else:
             err(f"{domain} → tampak down")
-            with open(FAILED_PATH, "w") as failed:
+            with open(FAILED_PATH, "a") as failed:
                 failed.write(hasil.stderr)
             print(f"  Detail error ada di {FAILED_PATH}")
             offline.append(domain)
@@ -123,23 +126,26 @@ def subfinder_fase(targets: list[str]) -> list[str]:
     separator("FASE SUBFINDER")
     all_subdomains: list[str] = []
 
-    for domain in targets:
-        info(f"Subfinder → {domain}")
-        hasil = subprocess.run(
-            ["subfinder", "-d", domain, "-recursive", "-silent"],
-            capture_output=True,
-            text=True,
-        )
-        if hasil.returncode != 0 and not hasil.stdout.strip():
-            err(f"Subfinder gagal untuk '{domain}': {hasil.stderr.strip()}")
-            continue
+    info(f"Subfinder → {", ".join(targets)}")
+    if len(targets) > 1:
+        _TMP_TARGETS.write_text("\n".join(targets))
+        cmd = ["subfinder", "-dL", str(_TMP_TARGETS), "-recursive", "-silent"]
+    else:
+        cmd = ["subfinder", "-d", targets[0], "-recursive", "-silent"]
 
-        subs = [
-            line.strip() for line in hasil.stdout.splitlines()
-            if line.strip()
-        ]
-        ok(f"{domain} → {len(subs)} subdomain ditemukan")
-        all_subdomains.extend(subs)
+    hasil = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+    )
+    subs = [
+        line.strip() for line in hasil.stdout.splitlines()
+        if line.strip()
+    ]
+
+    ok(f"Dari target: {", ".join(targets)}\n {len(subs)} subdomain ditemukan")
+
+    all_subdomains.extend(subs)
 
     # Deduplikasi + sort
     all_subdomains = sorted(set(all_subdomains))
@@ -154,7 +160,122 @@ def subfinder_fase(targets: list[str]) -> list[str]:
     return all_subdomains
 
 
-# ─── Fase httpx ───────────────────────────────────────────────────────────────
+# ─── Fase crt.sh ──────────────────────────────────────────────────────────────
+def hitung_umur(tanggal_domain_lahir: str) -> int:
+    tanggal_pisah = tanggal_domain_lahir.split("-")
+    tahun = int(tanggal_pisah[0])
+
+    tahun_sekarang = datetime.now().year
+    umur = tahun_sekarang - tahun
+    return umur
+
+
+def _query_crtsh(domain: str) -> dict[str, str | None]:
+    """
+    Query crt.sh untuk satu domain.
+    Kembalikan dict { subdomain: first_seen } dari certificate transparency logs.
+    """
+    url = f"https://crt.sh/?q=%.{domain}&output=json"
+    try:
+        resp = requests.get(url, timeout=15, headers={
+                            "Accept": "application/json",
+                            "User-Agent": "Mozilla/5.0"
+                            })
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.Timeout:
+        err(f"crt.sh timeout untuk '{domain}'")
+        return {}
+    except Exception as e:
+        err(f"crt.sh error untuk '{domain}': {e}")
+        return {}
+
+    seen: dict[str, str | None] = {}
+    for entry in data:
+        name_value = entry.get("name_value", "")
+        not_before = entry.get("not_before", None)
+
+        # name_value bisa berisi beberapa subdomain dipisah newline
+        for name in name_value.splitlines():
+            name = name.strip().lower().lstrip("*.")
+            if not name or not name.endswith(domain):
+                continue
+
+            # Simpan tanggal terlama (first seen = paling awal)
+            if name not in seen:
+                seen[name] = not_before
+            else:
+                if not_before and (seen[name] is None or not_before < seen[name]):
+                    seen[name] = not_before
+
+    # Normalisasi format tanggal: "2021-03-14T10:00:00" → "2021-03-14"
+    normalized: dict[str, str | None] = {}
+    for host, ts in seen.items():
+        if ts:
+            normalized[host] = ts[:10]
+        else:
+            normalized[host] = None
+
+    return normalized
+
+
+def crtsh_fase(targets: list[str], subdomains_from_subfinder: list[str]) -> list[dict]:
+    """
+    Query crt.sh untuk semua domain target secara paralel.
+    Gabungkan hasilnya dengan subdomain dari subfinder:
+    - Subdomain dari subfinder yang ada di crt.sh → dapat first_seen
+    - Subdomain dari subfinder yang tidak ada di crt.sh → first_seen: null
+    - Subdomain dari crt.sh yang tidak ada di subfinder → ditambahkan
+    Kembalikan list of dict { host, first_seen, source }.
+    """
+    separator("FASE CRT.SH")
+    info(f"Query crt.sh untuk {len(targets)} domain secara paralel...")
+
+    crtsh_map: dict[str, str | None] = {}
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), 10)) as ex:
+        futures = {ex.submit(_query_crtsh, d): d for d in targets}
+        for future in as_completed(futures):
+            domain = futures[future]
+            result = future.result()
+            crtsh_map.update(result)
+            ok(f"crt.sh '{domain}' → {len(result)} entri ditemukan")
+
+    # Gabungkan dengan hasil subfinder
+    subfinder_set = set(subdomains_from_subfinder)
+    crtsh_set = set(crtsh_map.keys())
+
+    combined: list[dict] = []
+
+    # Subfinder results, diperkaya dengan first_seen dari crt.sh
+    for host in sorted(subfinder_set):
+        combined.append({
+            "host":       host,
+            "first_seen": crtsh_map.get(host),
+            "age":        hitung_umur(crtsh_map[host]) if crtsh_map.get(host) else None,
+            "source":     "subfinder+crtsh" if host in crtsh_set else "subfinder",
+        })
+
+    # Subdomain eksklusif dari crt.sh (tidak ditemukan subfinder)
+    exclusive_crtsh = sorted(crtsh_set - subfinder_set)
+    for host in exclusive_crtsh:
+        combined.append({
+            "host":       host,
+            "first_seen": crtsh_map[host],
+            "age":        hitung_umur(crtsh_map[host]) if crtsh_map.get(host) else None,
+            "source":     "crtsh",
+        })
+
+    total_all = len(combined)
+    total_with_date = sum(1 for e in combined if e["first_seen"])
+    total_crtsh_only = len(exclusive_crtsh)
+
+    ok(f"Total gabungan: {total_all} subdomain unik")
+    ok(f"Dengan data first_seen: {total_with_date}")
+    ok(f"Subdomain eksklusif dari crt.sh: {total_crtsh_only}")
+
+    return combined
+
 
 def httpx_fase() -> list[dict]:
     separator("FASE HTTPX")
@@ -245,7 +366,7 @@ def cleanup():
 def tulis_report(
     target_input: str,
     targets: list[str],
-    subdomains: list[str],
+    subdomains_enriched: list[dict],
     httpx_data: list[dict],
     nuclei_data: list[dict],
 ):
@@ -257,8 +378,8 @@ def tulis_report(
             "scan_time":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
         "subfinder": {
-            "total":      len(subdomains),
-            "subdomains": subdomains,
+            "total":      len(subdomains_enriched),
+            "subdomains": subdomains_enriched,
         },
         "httpx": {
             "total":   len(httpx_data),
@@ -283,8 +404,8 @@ def main():
 
     print(f"""
   ╔══════════════════════════════════════════════════╗
-  ║  jingcrack Again  —  Recon Pipeline                 ║
-  ║  subfinder → httpx → nuclei                      ║
+  ║  JingCrack  —  Recon Pipeline                    ║
+  ║  subfinder → crt.sh → httpx → nuclei             ║
   ║  Scan ID : {RANDOM_ID:<38}║
   ╚══════════════════════════════════════════════════╝
 """)
@@ -293,22 +414,34 @@ def main():
     targets = ambil_input(target_input)
 
     info(f"Target: {', '.join(targets)}")
-    info(f"Output folder: results/{RANDOM_ID}/\n")
+    info(f"Output folder: {RESULTS_DIR}")
 
     # Pipeline
-    ping = pinging(targets)
-    subdomains = subfinder_fase(ping[0])
+    target_for_subfinder = pinging(targets)
+    if len(target_for_subfinder[0]) == 0:
+        err("Semua target tampak down. Pipeline dihentikan.")
+        sys.exit(1)
+    subdomains = subfinder_fase(target_for_subfinder[0])
 
     if not subdomains:
         err("Tidak ada subdomain ditemukan. Pipeline dihentikan.")
         sys.exit(1)
+
+    subdomains_enriched = crtsh_fase(targets, subdomains)
+
+    # Update file subdomain txt dengan hasil gabungan (host saja, plain text)
+    all_hosts = sorted({entry["host"] for entry in subdomains_enriched})
+    OUT_SUBDOMAIN.write_text("\n".join(all_hosts), encoding="utf-8")
+    _TMP_SUBFINDER.write_text("\n".join(all_hosts), encoding="utf-8")
+    ok(f"File subdomain diperbarui → {len(all_hosts)} host total")
 
     httpx_data = httpx_fase()
     nuclei_data = nuclei_fase()
 
     # Tulis report & bersihkan tmp
     separator("OUTPUT")
-    tulis_report(target_input, targets, subdomains, httpx_data, nuclei_data)
+    tulis_report(target_input, targets, subdomains_enriched,
+                 httpx_data, nuclei_data)
     cleanup()
 
     separator()
@@ -326,7 +459,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     try:
-        os.makedirs(DIRNAME)
         main()
     except KeyboardInterrupt:
         print("\n\n  [!] Proses dihentikan oleh user.")

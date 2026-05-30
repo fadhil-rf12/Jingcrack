@@ -1,28 +1,33 @@
 # JingCrack - Network Reconnaissance Pipeline
 
-JingCrack adalah tool otomatis untuk melakukan reconnaissance pada target domain dengan menggabungkan tiga tahap scanning: subfinder (enumerasi subdomain), httpx (deteksi host aktif), dan nuclei (vulnerability scanning).
+JingCrack adalah tool otomatis untuk melakukan reconnaissance pada target domain dengan menggabungkan empat tahap scanning: subfinder (enumerasi subdomain), crt.sh (domain age checking), httpx (deteksi host aktif), dan nuclei (vulnerability scanning).
 
 ## Fitur Utama
 
-- Subfinder Integration: Enumerasi subdomain secara rekursif dari domain target
+- Subfinder Integration: Enumerasi subdomain secara rekursif dari domain target, mendukung single domain (-d) dan multiple domain dari file (-dL)
+- Domain Age Checking: Pemeriksaan tanggal pertama kali subdomain muncul di Certificate Transparency Logs via crt.sh, termasuk perhitungan umur domain dalam tahun
 - HTTP Detection: Identifikasi host aktif dengan httpx
 - Vulnerability Scanning: Deteksi vulnerability kritis dan high-risk dengan nuclei
 - Auto Organization: Semua output disimpan dalam folder terstruktur dengan ID random unik
-- Clean Output: Dua file output terakhir (list subdomain + report lengkap JSON)
+- Clean Output: Dua file output akhir (list subdomain + report lengkap JSON)
 - Error Handling: Penanganan error yang proper di setiap fase
 
 ## Prasyarat
 
 Pastikan sudah menginstall dependencies berikut:
 
-1. Python 3.7+
-2. subfinder
-3. httpx
-4. nuclei
+1. Python 3.12+
+2. Python library: `requests`
+3. subfinder
+4. httpx
+5. nuclei
 
 ### Instalasi Dependencies (Linux/macOS)
 
 ```bash
+# Python library
+pip install requests
+
 # Subfinder
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 
@@ -61,7 +66,7 @@ Scan dari file:
 python3 jingcrack.py -t targets.txt
 ```
 
-File targets.txt format:
+Format file targets.txt:
 ```
 # Domain untuk testing
 google.com
@@ -74,12 +79,19 @@ api.example.com
 ## Pipeline Scanning
 
 ### 1. Fase Pinging
-Cek ketersediaan target dengan ping (3 paket). Mencatat mana yang online dan mana yang offline.
+Cek ketersediaan target dengan ping (3 paket). Mencatat mana yang online dan mana yang offline. Hanya domain yang online yang akan dilanjutkan ke fase subfinder. Detail error domain yang down disimpan ke file `NMAP_FAILED.txt` di dalam folder output.
 
 ### 2. Fase Subfinder
-Melakukan enumerasi subdomain rekursif untuk setiap domain target menggunakan subfinder dengan flag `-recursive -silent`. Hasil subdomain dikumpulkan, didedulikasi, dan diurutkan.
+Melakukan enumerasi subdomain rekursif untuk domain target yang terdeteksi online. Jika input berupa single domain, menggunakan flag `-d`. Jika input berupa file berisi banyak domain, subfinder langsung membaca file tersebut menggunakan flag `-dL` tanpa loop per domain. Hasil subdomain dikumpulkan, dideduplikasi, dan diurutkan.
 
-### 3. Fase HTTPX
+### 3. Fase crt.sh (Domain Age Checking)
+Melakukan query ke Certificate Transparency Logs via crt.sh untuk setiap domain target secara paralel. Hasilnya digabungkan dengan subdomain dari subfinder:
+
+- Subdomain dari subfinder yang ada di crt.sh: mendapat data `first_seen` dan `age`
+- Subdomain dari subfinder yang tidak ada di crt.sh: `first_seen` dan `age` bernilai null
+- Subdomain eksklusif dari crt.sh yang tidak ditemukan subfinder: tetap ditambahkan ke list
+
+### 4. Fase HTTPX
 Melakukan probe terhadap semua subdomain yang ditemukan untuk mengidentifikasi:
 - Status HTTP/HTTPS
 - Header response
@@ -87,7 +99,7 @@ Melakukan probe terhadap semua subdomain yang ditemukan untuk mengidentifikasi:
 
 Output dalam format JSON per baris.
 
-### 4. Fase Nuclei
+### 5. Fase Nuclei
 Menjalankan vulnerability scanning dengan konfigurasi:
 - Mode: auto-scan (`-as`)
 - Severity: critical, high, medium
@@ -100,17 +112,19 @@ Semua output disimpan dalam struktur folder:
 
 ```
 results/
-└── <RANDOM_ID>/
+└── jingcrack_<RANDOM_ID>/
     ├── <RANDOM_ID>_subdomain.txt    (List semua subdomain ditemukan)
-    └── <RANDOM_ID>_report.json      (Report lengkap dalam JSON)
+    ├── <RANDOM_ID>_report.json      (Report lengkap dalam JSON)
+    └── NMAP_FAILED.txt              (Detail error domain yang down, jika ada)
 ```
 
 Contoh struktur folder:
 ```
 results/
-└── 4821/
+└── jingcrack_4821/
     ├── 4821_subdomain.txt
-    └── 4821_report.json
+    ├── 4821_report.json
+    └── NMAP_FAILED.txt
 ```
 
 ### Format File Output
@@ -140,9 +154,24 @@ Struktur JSON lengkap dengan semua hasil scanning:
   "subfinder": {
     "total": 150,
     "subdomains": [
-      "api.example.com",
-      "app.example.com",
-      ...
+      {
+        "host": "api.example.com",
+        "first_seen": "2019-07-02",
+        "age": 5,
+        "source": "subfinder+crtsh"
+      },
+      {
+        "host": "cdn.example.com",
+        "first_seen": null,
+        "age": null,
+        "source": "subfinder"
+      },
+      {
+        "host": "old.example.com",
+        "first_seen": "2017-01-15",
+        "age": 8,
+        "source": "crtsh"
+      }
     ]
   },
   "httpx": {
@@ -151,10 +180,8 @@ Struktur JSON lengkap dengan semua hasil scanning:
       {
         "url": "https://api.example.com",
         "status_code": 200,
-        "content_length": 1024,
-        ...
-      },
-      ...
+        "content_length": 1024
+      }
     ]
   },
   "nuclei": {
@@ -163,25 +190,33 @@ Struktur JSON lengkap dengan semua hasil scanning:
       {
         "template": "ssl-expired",
         "type": "ssl",
-        "severity": "high",
-        ...
-      },
-      ...
+        "severity": "high"
+      }
     ]
   }
 }
 ```
 
+### Penjelasan Field Subdomain
+
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `host` | string | Nama subdomain |
+| `first_seen` | string / null | Tanggal pertama kali muncul di Certificate Transparency Logs (format: YYYY-MM-DD) |
+| `age` | integer / null | Umur subdomain dalam tahun dihitung dari `first_seen` |
+| `source` | string | Asal data: `subfinder+crtsh`, `subfinder`, atau `crtsh` |
+
 ## Penjelasan Istilah
 
 - **Subdomain**: Domain yang merupakan bagian dari domain utama (contoh: api.google.com adalah subdomain dari google.com)
+- **Certificate Transparency Logs**: Sistem pencatatan publik yang menyimpan semua SSL certificate yang pernah diterbitkan, digunakan crt.sh untuk melacak kapan sebuah subdomain pertama kali memiliki sertifikat SSL
 - **HTTP Probe**: Pengiriman request HTTP/HTTPS ke sebuah host untuk mengecek status dan respons
 - **Vulnerability Scanning**: Proses mencari kerentanan keamanan pada aplikasi/infrastruktur target
 - **Severity Level**: Tingkat keparahan vulnerability (critical > high > medium > low)
 
 ## Fitur Tambahan
 
-### Paging dan Logging
+### Progress Logging
 Setiap scanning akan menampilkan progress dengan format output yang rapi:
 ```
   [*] Info message
@@ -193,12 +228,14 @@ Setiap scanning akan menampilkan progress dengan format output yang rapi:
 File sementara yang dibuat selama proses scanning akan otomatis dihapus setelah report final digenerate.
 
 ### Deduplikasi
-Subdomain yang ditemukan dari multiple sources akan otomatis didedulikasi dan diurutkan secara alfabetis.
+Subdomain yang ditemukan dari subfinder maupun crt.sh akan otomatis dideduplikasi dan diurutkan secara alfabetis.
+
+### Paralel crt.sh Query
+Query ke crt.sh untuk setiap domain target dijalankan secara paralel menggunakan ThreadPoolExecutor, sehingga lebih efisien untuk input banyak domain.
 
 ## Troubleshooting
 
 ### Error: "subfinder tidak ditemukan"
-Solusi:
 ```bash
 which subfinder
 # Jika tidak ditemukan, install ulang
@@ -210,18 +247,21 @@ export PATH=$PATH:$(go env GOPATH)/bin
 Kemungkinan penyebab:
 - File input subdomain tidak ada atau kosong
 - httpx belum terinstall dengan benar
-- Permissions masalah pada folder results
+- Permissions bermasalah pada folder results
 
 ### Error: "nuclei gagal"
 Kemungkinan penyebab:
 - Nuclei templates belum diupdate
-- Memori insufficient untuk scanning besar-besaran
+- Memori tidak cukup untuk scanning besar
 - Rate limit terlalu tinggi untuk infrastruktur target
 
 Solusi update nuclei templates:
 ```bash
 nuclei -update-templates
 ```
+
+### crt.sh timeout
+crt.sh kadang lambat untuk domain besar. Timeout default adalah 15 detik per domain. Jika sering timeout, coba jalankan ulang — hasil subfinder tetap tersimpan dan pipeline tetap berlanjut meski crt.sh gagal untuk sebagian domain.
 
 ## Catatan Penting
 
@@ -233,10 +273,20 @@ nuclei -update-templates
 ## Performance Tips
 
 - Untuk scanning besar (100+ subdomain), pastikan memory cukup
-- Nuclei rate limit dapat disesuaikan sesuai kemampuan target
-- Jalankan pada server/VPS jika scanning dari laptop lokal untuk hasil lebih stabil
+- Nilai `-rl` dan `-c` pada nuclei dapat disesuaikan dengan kemampuan jaringan dan target
+- Jalankan pada server/VPS untuk hasil lebih stabil dibanding laptop lokal
 
 ## Changelog
+
+### v1.1
+- Tambah fase crt.sh untuk domain age checking
+- Format subdomain di report JSON berubah dari array of string menjadi array of object (host, first_seen, age, source)
+- Subfinder sekarang menggunakan -dL untuk input file (lebih efisien, tanpa loop per domain)
+- Query crt.sh dijalankan paralel dengan ThreadPoolExecutor
+- Tambah field `age` (umur domain dalam tahun) di setiap entri subdomain
+- Perbaikan bug: mode "w" pada NMAP_FAILED.txt diganti "a" agar tidak overwrite
+- Perbaikan bug: pengecekan hasil pinging yang salah tipe data
+- Nama folder output berubah dari `<ID>` menjadi `jingcrack_<ID>`
 
 ### v1.0
 - Initial release
@@ -255,4 +305,4 @@ Untuk issue atau pertanyaan, silakan hubungi developer atau buat issue di reposi
 ---
 
 JingCrack - Jumping Around Scanning Tool
-Version 1.0
+Version 1.1
