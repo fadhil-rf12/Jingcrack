@@ -4,10 +4,11 @@ JingCrack adalah tool otomatis untuk melakukan reconnaissance pada target domain
 
 ## Fitur Utama
 
+- Dorking: Generate Google dork queries untuk setiap domain target via dorkrecon.py
 - Subfinder Integration: Enumerasi subdomain secara rekursif dari domain target, mendukung single domain (-d) dan multiple domain dari file (-dL)
 - Domain Age Checking: Pemeriksaan tanggal pertama kali subdomain muncul di Certificate Transparency Logs via crt.sh, termasuk perhitungan umur domain dalam tahun
-- HTTP Detection: Identifikasi host aktif dengan httpx
-- Vulnerability Scanning: Deteksi vulnerability kritis dan high-risk dengan nuclei
+- HTTP Detection: Identifikasi host aktif beserta tech stack dan informasi lengkap via httpx
+- Vulnerability Scanning: Deteksi vulnerability kritis dan high-risk dengan nuclei, hanya pada host yang terbukti merespons HTTP
 - Auto Organization: Semua output disimpan dalam folder terstruktur dengan ID random unik
 - Clean Output: Dua file output akhir (list subdomain + report lengkap JSON)
 - Error Handling: Penanganan error yang proper di setiap fase
@@ -21,6 +22,7 @@ Pastikan sudah menginstall dependencies berikut:
 3. subfinder
 4. httpx
 5. nuclei
+6. dorkrecon.py (custom tool, letakkan di folder `CUSTOM-TOOL/`)
 
 ### Instalasi Dependencies (Linux/macOS)
 
@@ -78,33 +80,38 @@ api.example.com
 
 ## Pipeline Scanning
 
-### 1. Fase Pinging
-Cek ketersediaan target dengan ping (3 paket). Mencatat mana yang online dan mana yang offline. Hanya domain yang online yang akan dilanjutkan ke fase subfinder. Detail error domain yang down disimpan ke file `NMAP_FAILED.txt` di dalam folder output.
+### 1. Fase Dorking
+Generate Google dork queries untuk setiap domain target menggunakan dorkrecon.py. Hasil disimpan ke file `<domain>_dorking.txt` di dalam folder output. Fase ini berjalan untuk semua domain input sebelum proses ping.
 
-### 2. Fase Subfinder
+### 2. Fase Pinging
+Cek ketersediaan domain utama dengan ping (3 paket) secara paralel. Mencatat mana yang online dan mana yang offline. Hanya domain yang online yang akan dilanjutkan ke fase subfinder. Detail error domain yang down disimpan ke file `PING_FAILED.txt` di dalam folder output.
+
+### 3. Fase Subfinder
 Melakukan enumerasi subdomain rekursif untuk domain target yang terdeteksi online. Jika input berupa single domain, menggunakan flag `-d`. Jika input berupa file berisi banyak domain, subfinder langsung membaca file tersebut menggunakan flag `-dL` tanpa loop per domain. Hasil subdomain dikumpulkan, dideduplikasi, dan diurutkan.
 
-### 3. Fase crt.sh (Domain Age Checking)
+### 4. Fase crt.sh (Domain Age Checking)
 Melakukan query ke Certificate Transparency Logs via crt.sh untuk setiap domain target secara paralel. Hasilnya digabungkan dengan subdomain dari subfinder:
 
 - Subdomain dari subfinder yang ada di crt.sh: mendapat data `first_seen` dan `age`
 - Subdomain dari subfinder yang tidak ada di crt.sh: `first_seen` dan `age` bernilai null
 - Subdomain eksklusif dari crt.sh yang tidak ditemukan subfinder: tetap ditambahkan ke list
 
-### 4. Fase HTTPX
+### 5. Fase HTTPX
 Melakukan probe terhadap semua subdomain yang ditemukan untuk mengidentifikasi:
 - Status HTTP/HTTPS
 - Header response
-- Informasi host aktif
+- Tech stack (framework, server, CMS, dan lainnya)
+- Informasi host aktif lainnya
 
-Output dalam format JSON per baris.
+Output dalam format JSON per baris. URL yang berhasil direspons (berapapun status codenya) disimpan sebagai input untuk fase nuclei.
 
-### 5. Fase Nuclei
+### 6. Fase Nuclei
 Menjalankan vulnerability scanning dengan konfigurasi:
 - Mode: auto-scan (`-as`)
 - Severity: critical, high, medium
 - Rate limit: 50 req/detik
 - Concurrency: 25 thread
+- Target: hanya host yang terbukti merespons HTTP dari hasil httpx, bukan semua subdomain
 
 ## Output
 
@@ -115,7 +122,8 @@ results/
 └── jingcrack_<RANDOM_ID>/
     ├── <RANDOM_ID>_subdomain.txt    (List semua subdomain ditemukan)
     ├── <RANDOM_ID>_report.json      (Report lengkap dalam JSON)
-    └── NMAP_FAILED.txt              (Detail error domain yang down, jika ada)
+    ├── <domain>_dorking.txt         (Hasil dork queries, satu file per domain)
+    └── PING_FAILED.txt              (Detail error domain yang down, jika ada)
 ```
 
 Contoh struktur folder:
@@ -124,7 +132,8 @@ results/
 └── jingcrack_4821/
     ├── 4821_subdomain.txt
     ├── 4821_report.json
-    └── NMAP_FAILED.txt
+    ├── google.com_dorking.txt
+    └── PING_FAILED.txt
 ```
 
 ### Format File Output
@@ -277,6 +286,12 @@ crt.sh kadang lambat untuk domain besar. Timeout default adalah 15 detik per dom
 - Jalankan pada server/VPS untuk hasil lebih stabil dibanding laptop lokal
 
 ## Changelog
+
+### v1.2
+- Tambah fase dorking via dorkrecon.py (dijalankan di awal pipeline sebelum pinging)
+- Nuclei sekarang hanya scan host yang terbukti merespons HTTP dari hasil httpx, bukan semua subdomain
+- Nama file error ping diubah dari `NMAP_FAILED.txt` menjadi `PING_FAILED.txt`
+- httpx output sekarang juga mencakup tech stack detection secara otomatis via flag `-json`
 
 ### v1.1
 - Tambah fase crt.sh untuk domain age checking

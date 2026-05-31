@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-import os
 import sys
 import json
 import random
@@ -12,24 +11,33 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+# ─── Global Variabel ─────────────────────────────────────────────────────────
+TARGET_ONLINE = []
+TARGET_OFFLINE = []
+
 # ─── Konfigurasi awal ─────────────────────────────────────────────────────────
 
 RANDOM_ID = random.randint(1, 9999)
-PATH_CWD = Path(os.getcwd())
+PATH_CWD = Path.cwd()
+PATH_FILE = Path(__file__).resolve().parent
+
 DIRNAME = f"jingcrack_{RANDOM_ID}"
 RESULTS_DIR = PATH_CWD / DIRNAME
+
+PATH_DORKRECON = PATH_FILE / "CUSTOM-TOOL" / "dorkrecon.py"
 
 # File sementara (di dalam folder output)
 _TMP_TARGETS = RESULTS_DIR / f"{RANDOM_ID}_tmp_targets.txt"
 _TMP_SUBFINDER = RESULTS_DIR / f"{RANDOM_ID}_tmp_subfinder.txt"
 _TMP_HTTPX = RESULTS_DIR / f"{RANDOM_ID}_tmp_httpx.json"
+_TMP_HTTPX_ONLINE = RESULTS_DIR / f"{RANDOM_ID}_tmp_httpx_online.txt"
 
 # File output akhir
 OUT_SUBDOMAIN = RESULTS_DIR / f"{RANDOM_ID}_subdomain.txt"
 OUT_REPORT = RESULTS_DIR / f"{RANDOM_ID}_report.json"
 
-FAILED_FILENAME = "NMAP_FAILED.txt"
-FAILED_PATH = os.path.join(PATH_CWD, DIRNAME, FAILED_FILENAME)
+FAILED_FILENAME = "PING_FAILED.txt"
+FAILED_PATH = PATH_CWD / DIRNAME / FAILED_FILENAME
 
 # ─── Argumen CLI ──────────────────────────────────────────────────────────────
 
@@ -95,29 +103,30 @@ def ambil_input(target: str) -> list[str]:
 
 # ─── Fase pinging ─────────────────────────────────────────────────────────────
 
-def pinging(targets: list[str]):
+def pinging(target: str):
+    hasil = subprocess.run(
+        ["ping", "-c", "3", target],
+        capture_output=True,
+        text=True,
+    )
+    if hasil.returncode == 0:
+        info(f"Target '{target}' tampak online")
+        TARGET_ONLINE.append(target)
+    else:
+        info(f"Target '{target}' tampak offline (ping gagal)")
+        with open(FAILED_PATH, "a") as failed:
+            failed.write(f"{target}: \n{hasil.stderr or hasil.stdout}\n\n")
+        TARGET_OFFLINE.append(target)
+
+
+def ping_loop(targets: list[str]):
     separator("FASE PINGING")
-    online, offline = [], []
+    with ThreadPoolExecutor(max_workers=min(len(targets), 10)) as executor:
+        futures = {executor.submit(pinging, t): t for t in targets}
+        for future in as_completed(futures):
+            pass  # Hasil sudah ditangani di fungsi pinging
 
-    for domain in targets:
-        hasil = subprocess.run(
-            ["ping", "-c", "3", domain],
-            capture_output=True,
-            text=True,
-        )
-        if hasil.returncode == 0:
-            ok(f"{domain} → online")
-            online.append(domain)
-        else:
-            err(f"{domain} → tampak down")
-            with open(FAILED_PATH, "a") as failed:
-                failed.write(hasil.stderr)
-            print(f"  Detail error ada di {FAILED_PATH}")
-            offline.append(domain)
-
-    info(f"Selesai: {len(online)} online, {len(offline)} offline "
-         f"dari {len(targets)} target.")
-    return online, offline
+    info(f"{len(TARGET_ONLINE)} online, {len(TARGET_OFFLINE)} offline")
 
 
 # ─── Fase subfinder ───────────────────────────────────────────────────────────
@@ -126,10 +135,11 @@ def subfinder_fase(targets: list[str]) -> list[str]:
     separator("FASE SUBFINDER")
     all_subdomains: list[str] = []
 
-    info(f"Subfinder → {", ".join(targets)}")
+    info(f"Subfinder → {', '.join(targets)}")
     if len(targets) > 1:
         _TMP_TARGETS.write_text("\n".join(targets))
-        cmd = ["subfinder", "-dL", str(_TMP_TARGETS), "-recursive", "-silent"]
+        cmd = ["subfinder", "-dL",
+               str(_TMP_TARGETS), "-recursive", "-silent", "-all"]
     else:
         cmd = ["subfinder", "-d", targets[0], "-recursive", "-silent"]
 
@@ -143,7 +153,8 @@ def subfinder_fase(targets: list[str]) -> list[str]:
         if line.strip()
     ]
 
-    ok(f"Dari target: {", ".join(targets)}\n {len(subs)} subdomain ditemukan")
+    info(f"Dari target: {', '.join(targets)}")
+    info(f"{len(subs)} subdomain ditemukan")
 
     all_subdomains.extend(subs)
 
@@ -277,6 +288,25 @@ def crtsh_fase(targets: list[str], subdomains_from_subfinder: list[str]) -> list
     return combined
 
 
+# ─── Fase Dorking ──────────────────────────────────────────────────────────────
+
+def dorking_fase(target: str):
+    separator("FASE DORKING")
+
+    FILE_OUTPUT_DORK = RESULTS_DIR / f"{target}_dorking.txt"
+
+    COMMAND = ["python3", str(PATH_DORKRECON), "-d", target,
+               "--save", "--output", str(FILE_OUTPUT_DORK)]
+
+    info(f"Membuat kode dorking untuk: {target}")
+    subprocess.run(COMMAND, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+
+    ok(f"Dorking selesai → hasil disimpan di {FILE_OUTPUT_DORK}")
+
+
+# ─── Fase httpx ──────────────────────────────────────────────────────────────
+
 def httpx_fase() -> list[dict]:
     separator("FASE HTTPX")
     info("Menjalankan httpx...")
@@ -284,7 +314,7 @@ def httpx_fase() -> list[dict]:
     hasil = subprocess.run(
         [
             "httpx",
-            "-l",  str(_TMP_SUBFINDER),
+            "-l",    str(_TMP_SUBFINDER),
             "-json",
             "-o", str(_TMP_HTTPX),
         ],
@@ -308,6 +338,10 @@ def httpx_fase() -> list[dict]:
                 except json.JSONDecodeError:
                     pass
 
+    online_urls = [r.get("url") or r.get("input")
+                   for r in httpx_results if r.get("url") or r.get("input")]
+    _TMP_HTTPX_ONLINE.write_text("\n".join(online_urls), encoding="utf-8")
+
     ok(f"httpx selesai → {len(httpx_results)} host aktif ditemukan")
     return httpx_results
 
@@ -323,7 +357,7 @@ def nuclei_fase() -> list[dict]:
     hasil = subprocess.run(
         [
             "nuclei",
-            "-list",   str(_TMP_SUBFINDER),
+            "-list",   str(_TMP_HTTPX_ONLINE),
             "-as",
             "-s",      "critical,high,medium",
             "-rl",     "50",
@@ -417,28 +451,41 @@ def main():
     info(f"Output folder: {RESULTS_DIR}")
 
     # Pipeline
-    target_for_subfinder = pinging(targets)
-    if len(target_for_subfinder[0]) == 0:
+    # 1. Dorking untuk setiap domain utama
+    for t in targets:
+        dorking_fase(t)
+
+    # 2. Pingin ke domain utama untuk filter
+    ping_loop(targets)
+    if len(TARGET_ONLINE) == 0:
         err("Semua target tampak down. Pipeline dihentikan.")
         sys.exit(1)
-    subdomains = subfinder_fase(target_for_subfinder[0])
 
+    elif TARGET_OFFLINE:
+        info(f"Detail error saat pinging disimpan di file {FAILED_PATH}")
+
+    # 3. Subfinder untuk domain utama yang online
+    subdomains = subfinder_fase(TARGET_ONLINE)
     if not subdomains:
         err("Tidak ada subdomain ditemukan. Pipeline dihentikan.")
         sys.exit(1)
 
+    # 5. Ambil first seen dan menghitung umur domain
     subdomains_enriched = crtsh_fase(targets, subdomains)
 
-    # Update file subdomain txt dengan hasil gabungan (host saja, plain text)
+    # 6. Update file subdomain txt dengan hasil gabungan (host saja, plain text)
     all_hosts = sorted({entry["host"] for entry in subdomains_enriched})
     OUT_SUBDOMAIN.write_text("\n".join(all_hosts), encoding="utf-8")
     _TMP_SUBFINDER.write_text("\n".join(all_hosts), encoding="utf-8")
     ok(f"File subdomain diperbarui → {len(all_hosts)} host total")
 
+    # 7. Fase httpx
     httpx_data = httpx_fase()
+
+    # 8. Fase nuclei
     nuclei_data = nuclei_fase()
 
-    # Tulis report & bersihkan tmp
+    # 9. Tulis report & bersihkan tmp
     separator("OUTPUT")
     tulis_report(target_input, targets, subdomains_enriched,
                  httpx_data, nuclei_data)
@@ -446,7 +493,7 @@ def main():
 
     separator()
     print(f"""
-  Output tersimpan di: results/{RANDOM_ID}/
+  Output tersimpan di: jingcrack_{RANDOM_ID}/
   ├── {RANDOM_ID}_subdomain.txt   (list subdomain)
   └── {RANDOM_ID}_report.json     (report lengkap)
 """)
