@@ -22,7 +22,7 @@ Pastikan sudah menginstall dependencies berikut:
 3. subfinder
 4. httpx
 5. nuclei
-6. dorkrecon.py (custom tool, letakkan di folder `CUSTOM-TOOL/`)
+6. dorkrecon.py (custom tool)
 
 ### Instalasi Dependencies (Linux/macOS)
 
