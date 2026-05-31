@@ -320,4 +320,4 @@ Untuk issue atau pertanyaan, silakan hubungi developer atau buat issue di reposi
 ---
 
 JingCrack - Jumping Around Scanning Tool
-Version 1.1
+Version 1.2
