@@ -290,7 +290,6 @@ crt.sh kadang lambat untuk domain besar. Timeout default adalah 15 detik per dom
 ### v1.2
 - Tambah fase dorking via dorkrecon.py (dijalankan di awal pipeline sebelum pinging)
 - Nuclei sekarang hanya scan host yang terbukti merespons HTTP dari hasil httpx, bukan semua subdomain
-- Nama file error ping diubah dari `NMAP_FAILED.txt` menjadi `PING_FAILED.txt`
 - httpx output sekarang juga mencakup tech stack detection secara otomatis via flag `-json`
 
 ### v1.1
@@ -309,13 +308,8 @@ crt.sh kadang lambat untuk domain besar. Timeout default adalah 15 detik per dom
 - Output terstruktur dengan ID random
 - Error handling comprehensive
 
-## License
-
-Open source untuk keperluan penetration testing yang sah dan authorized.
-
-## Support
-
-Untuk issue atau pertanyaan, silakan hubungi developer atau buat issue di repository.
+### Authorized Use & Ethical Guidelines:
+This tool is intended for educational and authorized security testing purposes only. Usage of this software for attacking targets without prior mutual consent is strictly prohibited. The developer assumes no liability for any misuse or damage caused by this software. Use it responsibly and within the boundaries of the law.
 
 ---
 
