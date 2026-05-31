@@ -390,7 +390,7 @@ def nuclei_fase() -> list[dict]:
 # ─── Bersihkan file sementara ─────────────────────────────────────────────────
 
 def cleanup():
-    for tmp in [_TMP_SUBFINDER, _TMP_HTTPX]:
+    for tmp in [_TMP_TARGETS, _TMP_SUBFINDER, _TMP_HTTPX, _TMP_HTTPX_ONLINE]:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
 
